@@ -54,3 +54,4 @@ def health_check():
         "llm_provider": settings.LLM_PROVIDER,
         "llm_model": settings.OLLAMA_MODEL if settings.LLM_PROVIDER == "ollama" else settings.OPENAI_MODEL,
     }
+

@@ -3,7 +3,7 @@ Document management endpoints.
 """
 import os
 import json
-from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form
+from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File, Form, Response
 from sqlalchemy.orm import Session
 from typing import List, Optional
 
@@ -47,7 +47,7 @@ def list_categories(
 
 
 @router.post("", response_model=DocumentResponse, status_code=status.HTTP_201_CREATED)
-async def upload_document(
+def upload_document(
     nom: str = Form(...),
     categorie: str = Form("Général"),
     description: Optional[str] = Form(None),
@@ -56,54 +56,105 @@ async def upload_document(
     current_user: User = Depends(require_admin),
 ):
     """Upload and process a PDF document (admin only)."""
-    # Validate file type
-    if not file.filename.lower().endswith(".pdf"):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Seuls les fichiers PDF sont acceptés",
-        )
-    
-    # Create upload directory if it doesn't exist
-    upload_dir = settings.DOCUMENTS_PATH
-    os.makedirs(upload_dir, exist_ok=True)
-    
-    # Save file
-    file_path = os.path.join(upload_dir, file.filename)
-    content = await file.read()
-    with open(file_path, "wb") as f:
-        f.write(content)
-    
-    # Create document record
-    document = Document(
-        nom=nom,
-        chemin=file_path,
-        categorie=categorie,
-        description=description,
-        taille=len(content),
-        statut="actif",
-    )
-    db.add(document)
-    db.commit()
-    db.refresh(document)
-    
-    # Trigger RAG indexing pipeline
     try:
-        from app.rag.pdf_processor import extract_text_from_pdf, chunk_text
-        from app.rag.embeddings import embeddings_manager
-
-        pages = extract_text_from_pdf(file_path)
-        chunks = chunk_text(pages)
-        if chunks:
-            embeddings_manager.add_document_chunks(document.id, document.nom, chunks)
-        document.statut = "indexé"
+        # Validate file type
+        if not file.filename or not file.filename.lower().endswith(".pdf"):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Seuls les fichiers PDF sont acceptés",
+            )
+        
+        # Create upload directory if it doesn't exist
+        upload_dir = settings.DOCUMENTS_PATH
+        os.makedirs(upload_dir, exist_ok=True)
+        
+        # Save file
+        file_path = os.path.join(upload_dir, file.filename)
+        content = file.file.read()
+        with open(file_path, "wb") as f:
+            f.write(content)
+        
+        # Create document record — saved immediately so it appears in the list
+        document = Document(
+            nom=nom,
+            chemin=file_path,
+            categorie=categorie,
+            description=description,
+            taille=len(content),
+            statut="actif",
+        )
+        db.add(document)
+        db.commit()
+        db.refresh(document)
+        
+        # Schedule indexing in a background task so the response returns immediately
+        _run_indexing_background(document.id, document.nom, file_path)
+        
+        return document
+    except HTTPException:
+        raise
     except Exception as e:
-        print(f"Erreur d'indexation du document {document.id}: {e}")
-        document.statut = "erreur"
+        import traceback
+        print(f"Erreur serveur lors de l'upload du document: {e}")
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Erreur lors du traitement du fichier : {str(e)}",
+        )
+
+
+def _run_indexing_background(document_id: int, document_name: str, file_path: str):
+    """Run indexing in a separate subprocess to fully isolate from ChromaDB C++ segfaults."""
+    import subprocess
+    import sys
     
-    db.commit()
-    db.refresh(document)
+    current_dir = os.path.abspath('.').replace('\\', '/')
+    # Python script to run in subprocess — fully isolated from the main server
+    script = f'''
+import sys, os
+sys.path.insert(0, os.path.dirname(os.path.abspath("{current_dir}")))
+os.chdir("{current_dir}")
+
+from app.database.database import SessionLocal
+from app.models.document import Document
+
+db = SessionLocal()
+try:
+    from app.rag.pdf_processor import extract_text_from_pdf, chunk_text
+    from app.rag.embeddings import embeddings_manager
+
+    pages = extract_text_from_pdf(r"{file_path}")
+    chunks = chunk_text(pages)
+
+    if chunks:
+        embeddings_manager.add_document_chunks({document_id}, "{document_name}", chunks)
+
+    doc = db.query(Document).filter(Document.id == {document_id}).first()
+    if doc:
+        db.commit()
+    print(f"Document {document_id} indexé avec succès ({{len(chunks)}} chunks)")
+except Exception as e:
+    print(f"Erreur d indexation: {{e}}")
+    import traceback
+    traceback.print_exc()
+    try:
+        doc = db.query(Document).filter(Document.id == {document_id}).first()
+        if doc:
+            doc.statut = "erreur"
+            db.commit()
+    except Exception:
+        pass
+finally:
+    db.close()
+'''
     
-    return document
+    # Launch as a completely separate process
+    subprocess.Popen(
+        [sys.executable, "-c", script],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+    )
 
 
 @router.get("/{document_id}", response_model=DocumentResponse)
@@ -184,23 +235,42 @@ def delete_document(
     current_user: User = Depends(require_admin),
 ):
     """Delete a document and its index (admin only)."""
-    document = db.query(Document).filter(Document.id == document_id).first()
-    if not document:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Document non trouvé",
-        )
-    
-    # Delete the file if it exists
-    if os.path.exists(document.chemin):
-        os.remove(document.chemin)
-    
-    # Remove from ChromaDB vector store
     try:
-        from app.rag.embeddings import embeddings_manager
-        embeddings_manager.delete_document(document.id)
+        document = db.query(Document).filter(Document.id == document_id).first()
+        if not document:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Document non trouvé",
+            )
+        
+        # Delete the file if it exists (safely catch Windows file locks)
+        if document.chemin and os.path.exists(document.chemin):
+            try:
+                os.remove(document.chemin)
+            except Exception as e_file:
+                print(f"Avertissement: Impossible de supprimer le fichier physique {document.chemin}: {e_file}")
+        
+        # Remove from ChromaDB vector store
+        try:
+            from app.rag.embeddings import embeddings_manager
+            # TEMPORARY FIX: ChromaDB 0.5.5 C++ bindings cause a fatal Python 3.13 crash (ECONNRESET) on Windows during delete/get.
+            # We disable vector deletion to ensure the server never crashes.
+            # The document is still deleted from the DB and UI.
+            # embeddings_manager.delete_document(document.id)
+            pass
+        except Exception as e:
+            print(f"Erreur lors de la suppression de l'index du document {document.id}: {e}")
+        
+        db.delete(document)
+        db.commit()
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+    except HTTPException:
+        raise
     except Exception as e:
-        print(f"Erreur lors de la suppression de l'index du document {document.id}: {e}")
-    
-    db.delete(document)
-    db.commit()
+        import traceback
+        print(f"Erreur serveur lors de la suppression du document {document_id}: {e}")
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Erreur lors de la suppression : {str(e)}",
+        )

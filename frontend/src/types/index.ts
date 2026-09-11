@@ -36,6 +36,7 @@ export interface UserUpdate {
   email?: string;
   role?: string;
   statut?: string;
+  mot_de_passe?: string;
 }
 
 export interface ProfileUpdate {
@@ -65,7 +66,7 @@ export interface DocumentUpdate {
 // ─── Conversation ─────────────────────────────────
 export interface SourceInfo {
   titre: string;
-  page: number | null;
+  page: number | string | null;
   extrait: string | null;
 }
 

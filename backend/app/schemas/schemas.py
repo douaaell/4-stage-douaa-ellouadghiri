@@ -2,7 +2,7 @@
 Pydantic schemas for request/response validation.
 """
 from datetime import datetime
-from typing import Optional, List
+from typing import Optional, List, Union
 from pydantic import BaseModel, EmailStr
 
 
@@ -32,6 +32,7 @@ class UserUpdate(BaseModel):
     email: Optional[str] = None
     role: Optional[str] = None
     statut: Optional[str] = None
+    mot_de_passe: Optional[str] = None
 
 
 class ProfileUpdate(BaseModel):
@@ -80,6 +81,14 @@ class DocumentResponse(BaseModel):
 
 
 # ─── Conversation ─────────────────────────────────────
+class ConversationCreate(BaseModel):
+    titre: Optional[str] = "Nouvelle question"
+
+
+class MessageCreate(BaseModel):
+    question: str
+
+
 class ConversationResponse(BaseModel):
     id: int
     user_id: int
@@ -94,7 +103,7 @@ class ConversationResponse(BaseModel):
 
 class SourceInfo(BaseModel):
     titre: str
-    page: Optional[int] = None
+    page: Optional[Union[int, str]] = None
     extrait: Optional[str] = None
 
 

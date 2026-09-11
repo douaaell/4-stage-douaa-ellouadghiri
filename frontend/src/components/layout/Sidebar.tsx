@@ -32,6 +32,7 @@ export default function Sidebar({ isCollapsed, isMobileOpen, onToggleCollapse, o
   ];
 
   const adminMenu = [
+    { to: '/chat', icon: MessageSquare, label: 'Nouvelle question' },
     { to: '/admin/dashboard', icon: LayoutDashboard, label: 'Tableau de bord' },
     { to: '/admin/documents', icon: FileText, label: 'Documents' },
     { to: '/admin/utilisateurs', icon: Users, label: 'Utilisateurs' },

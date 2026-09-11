@@ -10,6 +10,7 @@ import type {
 
 const api = axios.create({
   baseURL: '/api',
+  timeout: 300000, // 5 minutes timeout for AI generation
   headers: { 'Content-Type': 'application/json' },
 });
 
@@ -78,7 +79,9 @@ export const documentsApi = {
   
   upload: (formData: FormData) =>
     api.post<Document>('/documents', formData, {
-      headers: { 'Content-Type': 'multipart/form-data' },
+      headers: {
+        'Content-Type': undefined
+      }
     }).then(r => r.data),
   
   update: (id: number, data: DocumentUpdate) =>
@@ -95,6 +98,12 @@ export const conversationsApi = {
   
   get: (id: number) =>
     api.get<ConversationDetail>(`/conversations/${id}`).then(r => r.data),
+
+  create: (data?: { titre?: string }) =>
+    api.post<Conversation>('/conversations', data).then(r => r.data),
+
+  addMessage: (conversationId: number, question: string) =>
+    api.post<ChatResponse>(`/conversations/${conversationId}/messages`, { question }).then(r => r.data),
 
   delete: (id: number) =>
     api.delete(`/conversations/${id}`),

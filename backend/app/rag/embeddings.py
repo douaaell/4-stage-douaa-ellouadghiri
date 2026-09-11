@@ -24,9 +24,22 @@ class EmbeddingsManager:
         """Lazy-load embedding function."""
         if self._embedding_function is None:
             from chromadb.utils import embedding_functions
-            self._embedding_function = embedding_functions.SentenceTransformerEmbeddingFunction(
-                model_name=settings.EMBEDDING_MODEL
-            )
+            
+            if settings.LLM_PROVIDER == "ollama":
+                self._embedding_function = embedding_functions.OllamaEmbeddingFunction(
+                    url=f"{settings.OLLAMA_BASE_URL}/api/embeddings",
+                    model_name=settings.OLLAMA_MODEL,
+                )
+            elif settings.LLM_PROVIDER == "openai":
+                self._embedding_function = embedding_functions.OpenAIEmbeddingFunction(
+                    api_key=settings.OPENAI_API_KEY,
+                    model_name="text-embedding-3-small"
+                )
+            else:
+                # Fallback for other providers
+                self._embedding_function = embedding_functions.SentenceTransformerEmbeddingFunction(
+                    model_name=settings.EMBEDDING_MODEL
+                )
         return self._embedding_function
     
     def _get_collection(self):
@@ -102,13 +115,28 @@ class EmbeddingsManager:
         return retrieved
     
     def delete_document(self, document_id: int):
-        """Remove all chunks for a document from ChromaDB."""
-        collection = self._get_collection()
-        
-        # Delete by metadata filter
-        collection.delete(
-            where={"document_id": document_id}
-        )
+        """Remove all chunks for a document from ChromaDB safely."""
+        try:
+            collection = self._get_collection()
+            
+            if collection.count() == 0:
+                return
+                
+            # Fetch ALL documents to avoid C++ metadata filtering Segfault (ECONNRESET) on Python 3.13
+            results = collection.get()
+            
+            if not results or not results.get("ids") or not results.get("metadatas"):
+                return
+                
+            ids_to_delete = []
+            for i, metadata in enumerate(results["metadatas"]):
+                if metadata and metadata.get("document_id") == int(document_id):
+                    ids_to_delete.append(results["ids"][i])
+            
+            if ids_to_delete:
+                collection.delete(ids=ids_to_delete)
+        except Exception as e:
+            print(f"Avertissement lors de la suppression ChromaDB pour le document {document_id}: {e}")
 
 
 # Singleton instance

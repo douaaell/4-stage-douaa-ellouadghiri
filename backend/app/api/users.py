@@ -132,6 +132,9 @@ def update_user(
         user.role = user_data.role
     if user_data.statut is not None:
         user.statut = user_data.statut
+    if user_data.mot_de_passe is not None:
+        from app.core.security import get_password_hash
+        user.mot_de_passe = get_password_hash(user_data.mot_de_passe)
     
     db.commit()
     db.refresh(user)

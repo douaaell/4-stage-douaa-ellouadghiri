@@ -161,7 +161,7 @@ export default function HistoryPage() {
                     </td>
                     <td className="px-6 py-4 text-right">
                       <button
-                        onClick={() => navigate(`/chat?c=${conv.id}`)}
+                        onClick={() => navigate(`/chat/${conv.id}`)}
                         className="inline-flex items-center gap-1 text-xs font-semibold text-primary hover:text-primary-700 transition-colors"
                       >
                         Ouvrir

@@ -32,6 +32,8 @@ export default function UserManagementPage() {
   const [editEmail, setEditEmail] = useState('');
   const [editRole, setEditRole] = useState('technicien');
   const [editStatut, setEditStatut] = useState('actif');
+  const [editPassword, setEditPassword] = useState('');
+  const [editConfirmPassword, setEditConfirmPassword] = useState('');
   const [isSavingEdit, setIsSavingEdit] = useState(false);
 
   // Delete state
@@ -99,6 +101,8 @@ export default function UserManagementPage() {
     setEditEmail(user.email);
     setEditRole(user.role);
     setEditStatut(user.statut);
+    setEditPassword('');
+    setEditConfirmPassword('');
     setIsEditOpen(true);
   };
 
@@ -106,14 +110,23 @@ export default function UserManagementPage() {
     e.preventDefault();
     if (!selectedUser || !editNom || !editEmail) return;
 
+    if (editPassword && editPassword !== editConfirmPassword) {
+      showToast('error', 'Les mots de passe ne correspondent pas');
+      return;
+    }
+
     setIsSavingEdit(true);
     try {
-      await usersApi.update(selectedUser.id, {
+      const payload: any = {
         nom: editNom,
         email: editEmail,
         role: editRole,
         statut: editStatut,
-      });
+      };
+      if (editPassword) {
+        payload.mot_de_passe = editPassword;
+      }
+      await usersApi.update(selectedUser.id, payload);
       showToast('success', 'Utilisateur mis à jour');
       setIsEditOpen(false);
       loadUsers();
@@ -290,11 +303,11 @@ export default function UserManagementPage() {
               </div>
 
               <div>
-                <label className="block text-xs font-semibold text-text-secondary uppercase tracking-wider mb-1.5">Adresse email</label>
+                <label className="block text-xs font-semibold text-text-secondary uppercase tracking-wider mb-1.5">Email</label>
                 <input
                   type="email"
                   required
-                  placeholder="ex: tech@electricite.com"
+                  placeholder="Email"
                   value={addEmail}
                   onChange={(e) => setAddEmail(e.target.value)}
                   className="w-full px-3 py-2 border border-border rounded-lg bg-background text-text-primary text-sm focus:outline-none focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500"
@@ -397,7 +410,7 @@ export default function UserManagementPage() {
               </div>
 
               <div>
-                <label className="block text-xs font-semibold text-text-secondary uppercase tracking-wider mb-1.5">Adresse email</label>
+                <label className="block text-xs font-semibold text-text-secondary uppercase tracking-wider mb-1.5">Email</label>
                 <input
                   type="email"
                   required
@@ -429,6 +442,29 @@ export default function UserManagementPage() {
                     <option value="actif">Actif</option>
                     <option value="inactif">Inactif</option>
                   </select>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-xs font-semibold text-text-secondary uppercase tracking-wider mb-1.5">Nouveau mot de passe</label>
+                  <input
+                    type="password"
+                    placeholder="Laisser vide pour inchangé"
+                    value={editPassword}
+                    onChange={(e) => setEditPassword(e.target.value)}
+                    className="w-full px-3 py-2 border border-border rounded-lg bg-background text-text-primary text-sm focus:outline-none focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-text-secondary uppercase tracking-wider mb-1.5">Confirmer le mot de passe</label>
+                  <input
+                    type="password"
+                    placeholder="Laisser vide pour inchangé"
+                    value={editConfirmPassword}
+                    onChange={(e) => setEditConfirmPassword(e.target.value)}
+                    className="w-full px-3 py-2 border border-border rounded-lg bg-background text-text-primary text-sm focus:outline-none focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500"
+                  />
                 </div>
               </div>
 

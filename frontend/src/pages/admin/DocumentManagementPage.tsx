@@ -81,34 +81,35 @@ export default function DocumentManagementPage() {
       formData.append('categorie', addCategorie);
       if (addDescription) formData.append('description', addDescription);
 
-      // Call API
+      // Call API (backend performs PDF text extraction and ChromaDB embedding indexing)
       const result = await documentsApi.upload(formData);
 
-      // 2. Simulate Extraction & Indexing steps visually as requested
-      setTimeout(() => {
-        setUploadStep('extract');
-        setTimeout(() => {
-          setUploadStep('index');
-          setTimeout(() => {
-            setUploadStep('done');
-            setTimeout(() => {
-              // Reset and close
-              setUploadStep('idle');
-              setPdfFile(null);
-              setAddNom('');
-              setAddCategorie('Général');
-              setAddDescription('');
-              setIsAddOpen(false);
-              showToast('success', 'Document ajouté et indexé avec succès');
-              loadDocuments();
-            }, 1000);
-          }, 1200);
-        }, 1200);
-      }, 1000);
+      // Advance through steps quickly since backend returns immediately
+      setUploadStep('extract');
+      await new Promise(r => setTimeout(r, 400));
+      setUploadStep('index');
+      await new Promise(r => setTimeout(r, 400));
+      setUploadStep('done');
+      await new Promise(r => setTimeout(r, 600));
+
+      // Reset and close
+      setUploadStep('idle');
+      setPdfFile(null);
+      setAddNom('');
+      setAddCategorie('Général');
+      setAddDescription('');
+      setIsAddOpen(false);
+      showToast('success', 'Document importé ! L\'indexation se poursuit en arrière-plan.');
+      loadDocuments();
 
     } catch (err: any) {
       setUploadStep('idle');
-      const msg = err.response?.data?.detail || 'Erreur lors de l\'import';
+      let msg = 'Erreur lors de l\'import';
+      if (err.response?.data?.detail) {
+        msg = typeof err.response.data.detail === 'string'
+          ? err.response.data.detail
+          : JSON.stringify(err.response.data.detail);
+      }
       showToast('error', msg);
     }
   };

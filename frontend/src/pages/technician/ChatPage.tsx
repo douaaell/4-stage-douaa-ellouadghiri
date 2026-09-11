@@ -1,18 +1,25 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { useSearchParams } from 'react-router-dom';
+import { useParams, useSearchParams, useNavigate } from 'react-router-dom';
 import ReactMarkdown from 'react-markdown';
-import { Send, FileText, Bot, AlertTriangle, Loader2 } from 'lucide-react';
+import { Send, FileText, Bot, Loader2, PlusCircle, MessageSquare } from 'lucide-react';
 import { chatApi, conversationsApi } from '../../services/api';
 import { useToast } from '../../context/ToastContext';
-import type { Message, SourceInfo } from '../../types';
+import type { Message, ConversationDetail } from '../../types';
 
 export default function ChatPage() {
-  const [searchParams, setSearchParams] = useSearchParams();
-  const conversationIdParam = searchParams.get('c');
+  const { id: routeId } = useParams<{ id?: string }>();
+  const [searchParams] = useSearchParams();
+  const navigate = useNavigate();
 
-  const [conversationId, setConversationId] = useState<number | undefined>(
-    conversationIdParam ? parseInt(conversationIdParam, 10) : undefined
-  );
+  // Determine active conversation ID from URL param (/chat/:id) or query param (/chat?c=id)
+  const urlConvId = routeId
+    ? parseInt(routeId, 10)
+    : searchParams.get('c')
+    ? parseInt(searchParams.get('c')!, 10)
+    : undefined;
+
+  const [conversationId, setConversationId] = useState<number | undefined>(urlConvId);
+  const [conversationTitle, setConversationTitle] = useState<string>('');
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
@@ -20,21 +27,29 @@ export default function ChatPage() {
 
   const { showToast } = useToast();
   const chatEndRef = useRef<HTMLDivElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  
+  // Track which conversation ID is currently loaded in state to prevent redundant re-fetching
+  const loadedConvIdRef = useRef<number | undefined>(undefined);
 
-  // Load conversation details when active ID changes
+  // Sync state when URL changes (e.g. clicking history item or sidebar "Nouvelle question")
   useEffect(() => {
-    const cId = searchParams.get('c');
-    if (cId) {
-      const parsedId = parseInt(cId, 10);
-      setConversationId(parsedId);
-      loadConversation(parsedId);
+    if (urlConvId && !isNaN(urlConvId)) {
+      if (loadedConvIdRef.current !== urlConvId) {
+        loadConversation(urlConvId);
+      }
     } else {
-      setConversationId(undefined);
-      setMessages([]);
+      // User requested a new conversation (e.g. navigated to /chat)
+      if (loadedConvIdRef.current !== undefined) {
+        setConversationId(undefined);
+        setConversationTitle('');
+        setMessages([]);
+        loadedConvIdRef.current = undefined;
+      }
     }
-  }, [searchParams]);
+  }, [urlConvId]);
 
-  // Scroll to bottom when messages change
+  // Scroll smoothly to bottom when messages or loading changes
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, isLoading]);
@@ -43,12 +58,30 @@ export default function ChatPage() {
     setIsPageLoading(true);
     try {
       const data = await conversationsApi.get(id);
-      setMessages(data.messages);
+      setMessages(data.messages || []);
+      setConversationId(data.id);
+      setConversationTitle(data.titre || '');
+      loadedConvIdRef.current = data.id;
     } catch (err: any) {
       showToast('error', 'Impossible de charger la conversation');
+      // Reset to clean chat if conversation not found
+      setConversationId(undefined);
+      setConversationTitle('');
+      setMessages([]);
+      loadedConvIdRef.current = undefined;
     } finally {
       setIsPageLoading(false);
     }
+  };
+
+  const handleStartNewChat = () => {
+    setConversationId(undefined);
+    setConversationTitle('');
+    setMessages([]);
+    loadedConvIdRef.current = undefined;
+    setInput('');
+    navigate('/chat');
+    setTimeout(() => textareaRef.current?.focus(), 50);
   };
 
   const handleSend = async (e?: React.FormEvent) => {
@@ -59,9 +92,10 @@ export default function ChatPage() {
     setInput('');
     setIsLoading(true);
 
-    // Optimistically add user question
+    // Optimistically add user question to the ongoing list of messages
+    const tempMsgId = Date.now();
     const tempUserMsg: Message = {
-      id: Date.now(),
+      id: tempMsgId,
       conversation_id: conversationId || 0,
       question: userQuestion,
       reponse: '',
@@ -71,24 +105,28 @@ export default function ChatPage() {
     setMessages(prev => [...prev, tempUserMsg]);
 
     try {
+      // Send question with current conversationId (or undefined for first question)
       const result = await chatApi.send({
         question: userQuestion,
         conversation_id: conversationId,
       });
 
-      // Update active conversation ID and URL parameter if new conversation
-      if (!conversationId) {
-        setConversationId(result.conversation_id);
-        setSearchParams({ c: result.conversation_id.toString() });
-      }
+      const activeId = result.conversation_id;
 
-      // Replace optimistic message with actual result
+      // Ensure conversationId is preserved for all subsequent questions
+      setConversationId(activeId);
+      loadedConvIdRef.current = activeId;
+
+      // Update browser URL without reloading page or wiping state
+      window.history.replaceState(null, '', `/chat/${activeId}`);
+
+      // Replace the optimistic message with the final response from AI
       setMessages(prev =>
         prev.map(msg =>
-          msg.id === tempUserMsg.id
+          msg.id === tempMsgId
             ? {
                 id: Date.now() + 1,
-                conversation_id: result.conversation_id,
+                conversation_id: activeId,
                 question: result.question,
                 reponse: result.reponse,
                 sources: result.sources,
@@ -98,11 +136,58 @@ export default function ChatPage() {
         )
       );
     } catch (err: any) {
-      showToast('error', 'Erreur lors de la génération de la réponse');
-      // Remove optimistic message if error
-      setMessages(prev => prev.filter(msg => msg.id !== tempUserMsg.id));
+      // Si une coupure réseau ou proxy s'est produite (ex: ERR_EMPTY_RESPONSE),
+      // le backend a très probablement terminé et persisté la réponse dans SQLite.
+      // Tentative de récupération automatique :
+      let recovered = false;
+      const targetId = conversationId || loadedConvIdRef.current;
+
+      for (let attempt = 1; attempt <= 4; attempt++) {
+        await new Promise(res => setTimeout(res, 2000));
+        try {
+          let convDetail: ConversationDetail | null = null;
+          if (targetId) {
+            convDetail = await conversationsApi.get(targetId);
+          } else {
+            const list = await conversationsApi.list();
+            if (list && list.length > 0) {
+              convDetail = await conversationsApi.get(list[0].id);
+            }
+          }
+
+          if (convDetail && convDetail.messages && convDetail.messages.length > 0) {
+            const lastMsg = convDetail.messages[convDetail.messages.length - 1];
+            if (lastMsg.question.trim() === userQuestion.trim() && lastMsg.reponse) {
+              setConversationId(convDetail.id);
+              loadedConvIdRef.current = convDetail.id;
+              window.history.replaceState(null, '', `/chat/${convDetail.id}`);
+              setMessages(convDetail.messages);
+              recovered = true;
+              break;
+            }
+          }
+        } catch {
+          // Ignorer l'erreur durant la tentative de récupération
+        }
+      }
+
+      if (!recovered) {
+        showToast('error', "Le serveur met du temps à répondre. La réponse sera visible dans l'Historique.");
+        // Préserver impérativement la question affichée à l'écran avec un message de statut
+        setMessages(prev =>
+          prev.map(msg =>
+            msg.id === tempMsgId
+              ? {
+                  ...msg,
+                  reponse: "Le traitement de votre question a pris plus de temps que prévu ou la connexion réseau s'est interrompue. Votre réponse est en cours de finalisation et apparaîtra dans votre Historique.",
+                }
+              : msg
+          )
+        );
+      }
     } finally {
       setIsLoading(false);
+      setTimeout(() => textareaRef.current?.focus(), 50);
     }
   };
 
@@ -116,6 +201,35 @@ export default function ChatPage() {
   return (
     <div className="flex flex-col h-[calc(100vh-7rem)] max-w-5xl mx-auto bg-card border border-border rounded-xl shadow-sm overflow-hidden">
       
+      {/* Top Conversation Header */}
+      <div className="px-5 py-3.5 border-b border-border bg-gray-50/70 flex items-center justify-between">
+        <div className="flex items-center gap-2.5 min-w-0">
+          <div className="w-8 h-8 rounded-lg bg-primary-100 text-primary-700 flex items-center justify-center flex-shrink-0">
+            <MessageSquare className="w-4 h-4" />
+          </div>
+          <div className="min-w-0">
+            <h2 className="text-sm font-semibold text-text-primary truncate">
+              {conversationTitle || (conversationId ? `Conversation #${conversationId}` : 'Nouvelle conversation')}
+            </h2>
+            <p className="text-xs text-text-secondary">
+              {conversationId
+                ? `${messages.length} message${messages.length > 1 ? 's' : ''} échangé${messages.length > 1 ? 's' : ''}`
+                : 'Posez votre première question'}
+            </p>
+          </div>
+        </div>
+
+        {/* Explicit button to start a fresh new conversation */}
+        <button
+          onClick={handleStartNewChat}
+          className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-primary-700 bg-white hover:bg-primary-50 border border-border hover:border-primary-200 rounded-lg shadow-2xs transition-colors"
+          title="Démarrer une nouvelle discussion vierge"
+        >
+          <PlusCircle className="w-3.5 h-3.5" />
+          <span>Nouvelle question</span>
+        </button>
+      </div>
+
       {/* Messages list */}
       <div className="flex-1 overflow-y-auto p-4 lg:p-6 space-y-6">
         {isPageLoading ? (
@@ -125,34 +239,20 @@ export default function ChatPage() {
           </div>
         ) : messages.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-full text-center p-8 max-w-md mx-auto">
-            <div className="w-12 h-12 rounded-xl bg-primary-50 flex items-center justify-center text-primary mb-4">
+            <div className="w-12 h-12 rounded-xl bg-primary-50 flex items-center justify-center text-primary mb-4 shadow-xs">
               <Bot className="w-6 h-6" />
             </div>
             <h3 className="font-semibold text-text-primary text-base">CSELEC assistant</h3>
             <p className="text-sm text-text-secondary mt-1.5 leading-relaxed">
               Posez une question technique en langage naturel. L'assistant recherchera des réponses précises dans la base documentaire.
             </p>
-            <div className="mt-6 w-full grid grid-cols-1 gap-2.5">
-              <button
-                onClick={() => setInput("Comment installer un disjoncteur différentiel 30 mA ?")}
-                className="text-left text-xs bg-background hover:bg-gray-50 border border-border p-3 rounded-lg text-text-secondary hover:text-text-primary transition-colors"
-              >
-                💡 Comment installer un disjoncteur différentiel 30 mA ?
-              </button>
-              <button
-                onClick={() => setInput("Quelle section de câble utiliser pour un four ?")}
-                className="text-left text-xs bg-background hover:bg-gray-50 border border-border p-3 rounded-lg text-text-secondary hover:text-text-primary transition-colors"
-              >
-                💡 Quelle section de câble utiliser pour un four ?
-              </button>
-            </div>
           </div>
         ) : (
           messages.map((msg, i) => (
             <div key={msg.id || i} className="space-y-4">
               {/* User Question */}
               <div className="flex justify-end">
-                <div className="max-w-[85%] bg-primary-50 text-primary-900 border border-primary-100 rounded-2xl px-4 py-3 text-sm shadow-sm">
+                <div className="max-w-[85%] bg-primary-50 text-primary-900 border border-primary-100 rounded-2xl px-4 py-3 text-sm shadow-2xs font-normal">
                   {msg.question}
                 </div>
               </div>
@@ -160,11 +260,11 @@ export default function ChatPage() {
               {/* Bot Response */}
               {msg.reponse && (
                 <div className="flex gap-3 max-w-[85%]">
-                  <div className="w-8 h-8 rounded-full bg-primary-500 text-white flex items-center justify-center flex-shrink-0 text-sm shadow-sm">
+                  <div className="w-8 h-8 rounded-full bg-primary-500 text-white flex items-center justify-center flex-shrink-0 text-sm shadow-2xs">
                     <Bot className="w-4.5 h-4.5" />
                   </div>
                   <div className="space-y-3 flex-1 min-w-0">
-                    <div className="bg-background border border-border rounded-2xl px-4 py-3 shadow-sm text-sm chat-markdown">
+                    <div className="bg-background border border-border rounded-2xl px-4 py-3 shadow-2xs text-sm chat-markdown">
                       <ReactMarkdown>{msg.reponse}</ReactMarkdown>
                     </div>
 
@@ -205,13 +305,13 @@ export default function ChatPage() {
               <Bot className="w-4.5 h-4.5 animate-spin" />
             </div>
             <div className="space-y-2 flex-1">
-              <div className="bg-background border border-border rounded-2xl px-4 py-3 flex items-center gap-3">
+              <div className="bg-background border border-border rounded-2xl px-4 py-3 flex items-center gap-3 shadow-2xs">
                 <div className="flex gap-1">
-                  <span className="w-2.5 h-2.5 bg-primary-400 rounded-full loading-dot" />
-                  <span className="w-2.5 h-2.5 bg-primary-400 rounded-full loading-dot" />
-                  <span className="w-2.5 h-2.5 bg-primary-400 rounded-full loading-dot" />
+                  <span className="w-2 h-2 bg-primary-400 rounded-full loading-dot" />
+                  <span className="w-2 h-2 bg-primary-400 rounded-full loading-dot" />
+                  <span className="w-2 h-2 bg-primary-400 rounded-full loading-dot" />
                 </div>
-                <span className="text-xs font-medium text-text-secondary">Recherche dans les documents...</span>
+                <span className="text-xs font-medium text-text-secondary">Recherche dans les documents et rédaction...</span>
               </div>
             </div>
           </div>
@@ -223,6 +323,7 @@ export default function ChatPage() {
       {/* Input area */}
       <form onSubmit={handleSend} className="p-4 border-t border-border bg-white flex items-end gap-3">
         <textarea
+          ref={textareaRef}
           rows={1}
           placeholder="Posez votre question ici..."
           value={input}
@@ -235,6 +336,7 @@ export default function ChatPage() {
           type="submit"
           disabled={isLoading || !input.trim()}
           className="flex-shrink-0 w-10 h-10 rounded-xl bg-primary-500 hover:bg-primary-600 disabled:bg-gray-100 text-white disabled:text-gray-400 flex items-center justify-center shadow-sm transition-colors"
+          title="Envoyer la question"
         >
           <Send className="w-4.5 h-4.5" />
         </button>
